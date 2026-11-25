@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Metal Heating Lab</title>
+<style>
+:root{color-scheme:dark;--bg:#07080a;--pn:#12141a;--ln:#262a33;--tx:#e8e6e1;--mu:#8d93a0;--hot:#ff7a2e;box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
+html{scroll-padding-top:env(safe-area-inset-top,0px)}
+body{margin:0;background:var(--bg);color:var(--tx);font-family:"Segoe UI",system-ui,-apple-system,Roboto,sans-serif}
+main{max-width:1000px;margin:0 auto;padding:14px}
+h1{font-size:1.2rem;margin:0 0 10px}
+.ctl{display:flex;flex-wrap:wrap;gap:10px 18px;align-items:flex-end;background:var(--pn);border:1px solid var(--ln);border-radius:10px;padding:10px 12px;margin-bottom:10px}
+.ctl label{display:flex;flex-direction:column;gap:4px;font-size:.78rem;color:var(--mu)}
+.ctl output{color:var(--tx)}
+input[type=range]{width:150px;accent-color:var(--hot)}
+input:disabled{opacity:.35}
+select,button{background:#1b1e26;color:var(--tx);border:1px solid var(--ln);border-radius:7px;padding:6px 10px;font:inherit;font-size:.85rem;cursor:pointer}
+button.p{background:var(--hot);color:#1a0d02;border-color:var(--hot);font-weight:600}
+:focus-visible{outline:2px solid var(--hot);outline-offset:2px}
+canvas{width:100%;height:auto;display:block;border-radius:10px;border:1px solid var(--ln);background:#000}
+.n{color:var(--mu);font-size:.8rem;line-height:1.5;margin-top:10px}
+</style></head><body><main>
+<h1>Metal Heating Lab</h1>
+<div class="ctl">
+<label>Source<select id="src"><option value="h">Heater (contact)</option><option value="i">Induction coil</option><option value="l">Laser</option></select></label>
+<label>Heater temperature <input id="tset" type="range" min="300" max="2500" step="10" value="1800"><output id="tsetO"></output></label>
+<label>Power <input id="pw" type="range" min="0" max="100" value="50"><output id="pwO"></output></label>
+<label>Position <input id="pos" type="range" min="8" max="92" value="40"><output id="posO"></output></label>
+<label>Environment<select id="env"><option value="15">Air</option><option value="0">Vacuum</option><option value="120">Fan</option><option value="2500">Water spray</option></select></label>
+<label>View<select id="vw"><option value="r">Realistic</option><option value="m">Heat map</option></select></label>
+<label>Speed<select id="spd"><option>1</option><option>10</option><option selected>60</option><option>200</option><option>500</option></select></label>
+<label>Unit<select id="unit"><option value="K">K</option><option value="C">°C</option></select></label>
+<button id="run" class="p">Pause</button><button id="rst">Reset</button>
+</div>
+<canvas id="cv" width="960" height="700" aria-label="Metal bar heating simulation with temperature graph and spectrometer"></canvas>
+<p class="n">Click a bar to place its probe and to choose the spectrometer and laser target. Thermal expansion is drawn 12× exaggerated. Melting uses the enthalpy method with latent heat (no liquid flow). With induction, iron heats best up to its Curie point (1043 K) and copper barely heats; with the laser, copper is highly reflective.</p>
+</main><script>
+const SG=5.670374e-8,TA=300,L=.4,N=96,DX=L/N,TH=.01,HCONT=3000,EXG=12;
+const M=[
+{n:'Copper',a:1.11e-4,rc:3.45e6,e:.3,tm:1358,lat:1.84e9,al:17e-6,ind:.25,ab:.06,c:[184,115,82],pc:'#e08a5f'},
+{n:'Iron',a:2.3e-5,rc:3.5e6,e:.7,tm:1811,lat:1.94e9,al:12e-6,ind:1,ab:.35,c:[125,123,126],pc:'#9aa3b5'},
+{n:'Stainless steel',a:4e-6,rc:3.9e6,e:.6,tm:1700,lat:2.16e9,al:17e-6,ind:.5,ab:.4,c:[170,175,182],pc:'#7fd0ff'},
+{n:'Tungsten',a:6.8e-5,rc:2.58e6,e:.35,tm:3695,lat:3.7e9,al:4.5e-6,ind:.7,ab:.5,c:[132,134,142],pc:'#c9a8ff'}];
+const cv=document.getElementById('cv'),ctx=cv.getContext('2d'),W=960,H=700,SH=440,S=6;
+const em=document.createElement('canvas');em.width=W/S;em.height=SH/S;const ex=em.getContext('2d');
+const $=i=>document.getElementById(i),F='"Segoe UI",system-ui,sans-serif';
+let T,LT,Th,simT,hist,run=true,last=0,mouse=null,sel=0,pr=[67,67,67,67],XS=[[],[],[],[]];
+function reset(){T=M.map(()=>new Float64Array(N).fill(TA));LT=M.map(()=>new Float64Array(N));Th=TA;simT=0;hist=[]}reset();
+const pl=(l,t)=>1/(Math.pow(l,5)*(Math.exp(1.4388e-2/(l*t))-1)),REF=pl(610e-9,1400);
+function glow(t){const r=pl(610e-9,t)/REF,g=pl(550e-9,t)/REF,b=pl(465e-9,t)/REF,m=Math.max(r,g,b),I=Math.min(1,Math.pow(m,.28)),ov=Math.min(1,Math.max(0,Math.log10(Math.max(m,1e-9))/3.5));
+return{c:[r/m*I,g/m*I,b/m*I].map(v=>v*(1-ov)+ov),I:Math.max(I,ov)}}
+const LUT=[];for(let t=250;t<=4000;t+=5)LUT.push(glow(t));
+const gl=t=>LUT[Math.max(0,Math.min(LUT.length-1,Math.round((t-250)/5)))];
+const rgb=c=>`rgb(${c.map(v=>Math.round(Math.min(1,v)*255))})`;
+const fmt=t=>$('unit').value=='C'?(t-273.15).toFixed(0)+' °C':t.toFixed(0)+' K';
+function step(dt){
+ const s=$('src').value,P=$('pw').value/100,c=$('pos').value/100,h=+$('env').value;
+ Th+=((s=='h'?+$('tset').value:TA)-Th)*(1-Math.exp(-dt/15));
+ M.forEach((m,k)=>{const t=T[k],lt=LT[k],o=new Float64Array(N),f=m.a/(DX*DX),rad=2/(m.rc*TH);
+  for(let i=0;i<N;i++){
+   const a=i?t[i-1]:t[i],b=i<N-1?t[i+1]:t[i],x=(i+.5)/N;
+   let d=f*(a-2*t[i]+b)-rad*(m.e*SG*(t[i]**4-TA**4)+h*(t[i]-TA));
+   if(!i&&s=='h')d+=HCONT*(Th-t[0])/(m.rc*DX);
+   if(s=='i'&&Math.abs(x-c)<.1)d+=5e8*P*m.ind*(k==1&&t[i]>1043?.3:1)/m.rc;
+   if(s=='l'&&k==sel){const q=(x-c)*L;d+=2e7*P*m.ab*Math.exp(-q*q/(2*4e-4))/TH/m.rc}
+   let v=t[i]+d*dt,Lq=lt[i];
+   if(v>m.tm&&Lq<m.lat){const e=(v-m.tm)*m.rc,r=m.lat-Lq;if(e<=r){Lq+=e;v=m.tm}else{v=m.tm+(e-r)/m.rc;Lq=m.lat}}
+   else if(v<m.tm&&Lq>0){const e=(m.tm-v)*m.rc;if(e<=Lq){Lq-=e;v=m.tm}else{v=m.tm-(e-Lq)/m.rc;Lq=0}}
+   o[i]=v;lt[i]=Lq}
+  T[k]=o});
+ simT+=dt}
+const X0=124,CW0=640/N,Y0=70,BH=58,GP=36,by=k=>Y0+k*(BH+GP);
+function heat(t){const u=Math.min(1,Math.max(0,(t-300)/2200));return[`hsl(${240-240*u},90%,${32+20*u}%)`]}
+function draw(){
+ ctx.globalCompositeOperation='source-over';ctx.globalAlpha=1;ctx.fillStyle='#050608';ctx.fillRect(0,0,W,H);
+ ex.setTransform(1,0,0,1,0,0);ex.clearRect(0,0,W,SH);ex.scale(1/S,1/S);
+ const hy=Y0-30,hh=4*(BH+GP)-GP+60,gh=gl(Th),mp=$('vw').value=='m',s=$('src').value,P=$('pw').value/100;
+ ctx.fillStyle='#2a2c33';ctx.fillRect(24,hy,84,hh);
+ const coil=()=>{ctx.beginPath();for(let y=hy+20,j=0;y<hy+hh-12;y+=22,j++){ctx.lineTo([44,88][j%2],y);ctx.lineTo([44,88][(j+1)%2],y+11)}};
+ ctx.strokeStyle=rgb(gh.c.map(v=>Math.max(v,.16)));ctx.lineWidth=5;coil();ctx.stroke();
+ ex.strokeStyle=rgb(gh.c);ex.globalAlpha=gh.I;ex.lineWidth=14;ex.setLineDash([]);
+ ex.beginPath();for(let y=hy+20,j=0;y<hy+hh-12;y+=22,j++){ex.lineTo([44,88][j%2],y);ex.lineTo([44,88][(j+1)%2],y+11)}ex.stroke();ex.globalAlpha=1;
+ ctx.fillStyle='#8d93a0';ctx.font='13px '+F;ctx.textAlign='left';ctx.fillText('Heater '+fmt(Th),24,hy-8);
+ M.forEach((m,k)=>{
+  const y=by(k);let mx=0,x=X0,sf=0,dl=0;XS[k]=[];
+  for(let i=0;i<N;i++){
+   const t=T[k][i],g=gl(t),w=g.I,fq=LT[k][i]/m.lat;mx=Math.max(mx,t);sf+=fq;dl+=m.al*(t-TA)*DX;
+   const cw=CW0*(1+EXG*m.al*(t-TA));XS[k].push(x);
+   if(mp)ctx.fillStyle=heat(t)[0];else{const b=m.c.map(v=>v*.55/255);ctx.fillStyle=rgb([b[0]*(1-w)+g.c[0],b[1]*(1-w)+g.c[1],b[2]*(1-w)+g.c[2]])}
+   ctx.fillRect(x,y,cw+1,BH);
+   if(!mp&&fq>0){ctx.fillStyle=`rgba(255,255,255,${.4*Math.min(1,fq)})`;ctx.fillRect(x,y,cw+1,BH)}
+   if(!mp&&w>.02){ex.fillStyle=rgb(g.c);ex.globalAlpha=Math.min(1,w*1.1);ex.fillRect(x-4,y-4,cw+9,BH+8)}
+   x+=cw}
+  XS[k].push(x);ex.globalAlpha=1;
+  const sh=ctx.createLinearGradient(0,y,0,y+BH);sh.addColorStop(0,'rgba(255,255,255,.16)');sh.addColorStop(.5,'rgba(255,255,255,0)');sh.addColorStop(1,'rgba(0,0,0,.3)');
+  ctx.fillStyle=sh;ctx.fillRect(X0,y,x-X0,BH);
+  ctx.strokeStyle=sel==k?'#fff':'#555a66';ctx.lineWidth=sel==k?1.5:1;ctx.strokeRect(X0-.5,y-.5,x-X0+1,BH+1);
+  const px=(XS[k][pr[k]]+XS[k][pr[k]+1])/2;ctx.beginPath();ctx.arc(px,y+BH/2,6,0,7);ctx.strokeStyle='#fff';ctx.lineWidth=sel==k?2.5:1.5;ctx.stroke();ctx.fillStyle=m.pc;ctx.fill();
+  ctx.font='600 13px '+F;ctx.fillStyle='#e8e6e1';ctx.textAlign='left';ctx.fillText(m.n+(sel==k&&s=='l'?'  (laser target)':''),X0,y-8);
+  ctx.font='12px '+F;ctx.fillStyle='#8d93a0';ctx.textAlign='right';
+  let inf='max '+fmt(mx)+' · expansion '+(dl*1000).toFixed(1)+' mm'+(sf>0?' · liquid %'+(sf/N*100).toFixed(0):'');
+  ctx.fillText(inf,X0+640+130,y-8);
+  if(mx>m.tm&&LT[k][0]>=0){ctx.fillStyle='#ff6a4d';ctx.fillText('melting point '+fmt(m.tm),X0+640+130-ctx.measureText(inf).width-12,y-8)}
+  ctx.textAlign='left'});
+ // induction coil
+ if(s=='i'){const c=$('pos').value/100,xa=X0+c*640-.1*640,xb=X0+c*640+.1*640,ya=Y0-10,yb=by(3)+BH+10;
+  for(let j=0;j<=7;j++){const x=xa+(xb-xa)*j/7;ctx.strokeStyle='#c87941';ctx.lineWidth=4;ctx.beginPath();ctx.moveTo(x,ya);ctx.lineTo(x+8,yb);ctx.stroke();
+   ex.strokeStyle='rgb(90,160,255)';ex.globalAlpha=P*.9;ex.lineWidth=10;ex.beginPath();ex.moveTo(x,ya);ex.lineTo(x+8,yb);ex.stroke()}ex.globalAlpha=1}
+ // laser
+ if(s=='l'&&P>0){const c=$('pos').value/100,xi=Math.floor(c*N),sx=(XS[sel][xi]+XS[sel][xi+1])/2,yt=by(sel);
+  ctx.fillStyle='#3a3d46';ctx.fillRect(sx-14,2,28,14);
+  ctx.strokeStyle=`rgba(255,40,40,${.4+.6*P})`;ctx.lineWidth=2+3*P;ctx.beginPath();ctx.moveTo(sx,16);ctx.lineTo(sx,yt);ctx.stroke();
+  ex.strokeStyle='#f33';ex.globalAlpha=.8;ex.lineWidth=10;ex.beginPath();ex.moveTo(sx,16);ex.lineTo(sx,yt);ex.stroke();
+  ex.fillStyle='#fff';ex.globalAlpha=Math.min(1,P+.3);ex.beginPath();ex.arc(sx,yt,12,0,7);ex.fill();ex.globalAlpha=1}
+ ctx.globalCompositeOperation='lighter';ctx.imageSmoothingEnabled=true;
+ ctx.globalAlpha=.9;ctx.drawImage(em,0,0,W,SH);ctx.globalAlpha=.5;ctx.drawImage(em,-6,-6,W+12,SH+12);
+ ctx.globalCompositeOperation='source-over';ctx.globalAlpha=1;
+ // colour scale
+ for(let i=0;i<W-48;i++){const t=300+i/(W-48)*2200;ctx.fillStyle=mp?heat(t)[0]:rgb(gl(t).c);ctx.fillRect(24+i,SH-8,2,8)}
+ ctx.fillStyle='#8d93a0';ctx.font='11px '+F;ctx.fillText('300 K',24,SH-12);ctx.textAlign='right';ctx.fillText('2500 K',W-24,SH-12);ctx.textAlign='left';
+ // graph
+ const gx=64,gy=468,gw=530,gh2=190;
+ ctx.fillStyle='#0d0f13';ctx.fillRect(0,SH+2,W,H-SH);
+ let ym=500;hist.forEach(p=>p.v.forEach(v=>ym=Math.max(ym,v)));ym*=1.05;const xm=Math.max(10,simT),yy=t=>gy+gh2-(t-250)/(ym-250)*gh2,xx=t=>gx+t/xm*gw;
+ ctx.strokeStyle='#262a33';ctx.fillStyle='#8d93a0';ctx.font='11px '+F;ctx.lineWidth=1;ctx.textAlign='right';
+ for(let j=0;j<=4;j++){const t=250+(ym-250)*j/4,y=yy(t);ctx.beginPath();ctx.moveTo(gx,y);ctx.lineTo(gx+gw,y);ctx.stroke();ctx.fillText(fmt(t),gx-6,y+4)}
+ ctx.textAlign='center';for(let j=0;j<=4;j++)ctx.fillText((xm*j/4).toFixed(0)+' s',gx+gw*j/4,gy+gh2+16);
+ ctx.setLineDash([4,4]);ctx.strokeStyle='#7a2c22';if(798<ym){ctx.beginPath();ctx.moveTo(gx,yy(798));ctx.lineTo(gx+gw,yy(798));ctx.stroke();ctx.textAlign='left';ctx.fillStyle='#b5594b';ctx.fillText('798 K: visible red glow',gx+4,yy(798)-4)}ctx.setLineDash([]);
+ M.forEach((m,k)=>{ctx.strokeStyle=m.pc;ctx.lineWidth=2;ctx.beginPath();hist.forEach((p,j)=>j?ctx.lineTo(xx(p.t),yy(p.v[k])):ctx.moveTo(xx(p.t),yy(p.v[k])));ctx.stroke()});
+ ctx.textAlign='left';ctx.font='12px '+F;ctx.fillStyle='#e8e6e1';ctx.fillText('Probe temperature  ·  time '+simT.toFixed(0)+' s',gx,gy-14);
+ M.forEach((m,k)=>{ctx.fillStyle=m.pc;ctx.fillText(m.n+' '+fmt(T[k][pr[k]]),gx+gw*k/4+(k>1?0:0),gy-1)});
+ // spectrometer
+ const sx0=670,sy0=468,sw=266,sh0=190,Ts=T[sel][pr[sel]],lx=l=>sx0+(l-.2)/2.8*sw,Y=v=>sy0+sh0-(Math.log10(Math.max(v,1e-2))+2)/10*sh0;
+ const B=l=>1.191e8/(Math.pow(l,5)*(Math.exp(1.4388e4/(l*Ts))-1));
+ ctx.fillStyle='#e8e6e1';ctx.textAlign='left';ctx.font='12px '+F;ctx.fillText('Spectrometer: '+M[sel].n+' · '+fmt(Ts),sx0,sy0-14);
+ ctx.strokeStyle='#262a33';ctx.strokeRect(sx0,sy0,sw,sh0);
+ const vg=ctx.createLinearGradient(lx(.38),0,lx(.75),0);[['#7a00ff',0],['#0040ff',.2],['#00d0ff',.35],['#3f3',.5],['#ff0',.65],['#f80',.82],['#f00',1]].forEach(([c,p])=>vg.addColorStop(p,c));
+ ctx.globalAlpha=.28;ctx.fillStyle=vg;ctx.fillRect(lx(.38),sy0,lx(.75)-lx(.38),sh0);ctx.globalAlpha=1;
+ ctx.beginPath();ctx.moveTo(sx0,sy0+sh0);for(let i=0;i<=sw;i++){ctx.lineTo(sx0+i,Y(B(.2+i/sw*2.8)))}ctx.lineTo(sx0+sw,sy0+sh0);ctx.fillStyle='rgba(255,140,60,.25)';ctx.fill();
+ ctx.beginPath();for(let i=0;i<=sw;i++){const y=Y(B(.2+i/sw*2.8));i?ctx.lineTo(sx0+i,y):ctx.moveTo(sx0+i,y)}ctx.strokeStyle='#ff9a4d';ctx.lineWidth=2;ctx.stroke();
+ const lm=2898/Ts;if(lm<3&&lm>.2){ctx.setLineDash([3,3]);ctx.strokeStyle='#8d93a0';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(lx(lm),sy0);ctx.lineTo(lx(lm),sy0+sh0);ctx.stroke();ctx.setLineDash([])}
+ ctx.fillStyle='#8d93a0';ctx.font='11px '+F;ctx.textAlign='center';[.5,1,1.5,2,2.5,3].forEach(l=>ctx.fillText(l+' µm',lx(l),sy0+sh0+14));
+ ctx.textAlign='left';ctx.fillText('Peak: '+(lm*1000).toFixed(0)+' nm (Wien)',sx0+4,sy0+14);ctx.fillText('Radiated power: '+(M[sel].e*SG*Ts**4/1000).toFixed(1)+' kW/m²',sx0+4,sy0+28);
+ ctx.fillText('log scale',sx0+sw-52,sy0+sh0-6);
+ if(mouse)for(let k=0;k<4;k++){const y=by(k);if(mouse.y>=y&&mouse.y<=y+BH){const i=XS[k].findIndex((x,j)=>mouse.x<x)-1;if(i>=0&&i<N){const tx=fmt(T[k][i])+' · '+(i*DX*100).toFixed(0)+' cm',tw=ctx.measureText(tx).width+16,px=Math.min(mouse.x+10,W-tw-4);
+  ctx.font='13px '+F;ctx.fillStyle='rgba(8,9,12,.92)';ctx.fillRect(px,mouse.y-32,tw+8,22);ctx.fillStyle='#e8e6e1';ctx.fillText(tx,px+8,mouse.y-16)}}}
+}
+function loop(now){const re=Math.min(.05,(now-last)/1000||0);last=now;
+ if(run){const sm=re*$('spd').value,n=Math.min(400,Math.max(1,Math.ceil(sm/.04))),dt=sm/n;for(let i=0;i<n;i++)step(dt);
+  hist.push({t:simT,v:T.map((a,k)=>a[pr[k]])});if(hist.length>1500)hist=hist.filter((_,i)=>i%2==0)}
+ draw();requestAnimationFrame(loop)}
+function ui(){const s=$('src').value;$('tset').disabled=s!='h';$('pw').disabled=s=='h';$('pos').disabled=s=='h';
+ $('tsetO').textContent=fmt(+$('tset').value);$('pwO').textContent=$('pw').value+'%';$('posO').textContent=($('pos').value*.4).toFixed(0)+' cm'}
+['src','tset','pw','pos','unit'].forEach(i=>$(i).addEventListener('input',ui));ui();
+$('run').onclick=()=>{run=!run;$('run').textContent=run?'Pause':'Start'};$('rst').onclick=reset;
+const cp=e=>{const r=cv.getBoundingClientRect();return{x:(e.clientX-r.left)*W/r.width,y:(e.clientY-r.top)*H/r.height}};
+cv.addEventListener('mousemove',e=>mouse=cp(e));cv.addEventListener('mouseleave',()=>mouse=null);
+cv.addEventListener('click',e=>{const p=cp(e);for(let k=0;k<4;k++)if(p.y>=by(k)&&p.y<=by(k)+BH){sel=k;const i=XS[k].findIndex(x=>p.x<x)-1;if(i>=0&&i<N)pr[k]=i}});
+requestAnimationFrame(loop);
+</script></body></html>
